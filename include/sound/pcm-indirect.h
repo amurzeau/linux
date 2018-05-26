@@ -50,6 +50,12 @@ snd_pcm_indirect_playback_transfer(struct snd_pcm_substream *substream,
 {
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	snd_pcm_uframes_t appl_ptr = runtime->control->appl_ptr;
+	
+	// when appl_ptr is not updated (as dmix does)
+	if(!appl_ptr && runtime->status->hw_ptr) {
+		appl_ptr = runtime->status->hw_ptr + 2*snd_pcm_lib_period_bytes(substream);
+	}
+		
 	snd_pcm_sframes_t diff = appl_ptr - rec->appl_ptr;
 	int qsize;
 
@@ -100,6 +106,8 @@ snd_pcm_indirect_playback_pointer(struct snd_pcm_substream *substream,
 		bytes += rec->hw_buffer_size;
 	rec->hw_io = ptr;
 	rec->hw_ready -= bytes;
+	if(rec->hw_ready < 0)
+		rec->hw_ready = 0;
 	rec->sw_io += bytes;
 	if (rec->sw_io >= rec->sw_buffer_size)
 		rec->sw_io -= rec->sw_buffer_size;

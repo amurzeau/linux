@@ -64,6 +64,14 @@ void bcm2835_playback_fifo(struct bcm2835_alsa_stream *alsa_stream)
 {
 	unsigned int consumed = 0;
 	int new_period = 0;
+	int old_hw_ptr;
+	struct timespec previousPosTimestamp = alsa_stream->pos_timestamp;
+	int64_t diffCallback;
+	int64_t diffConsumed;
+	
+	/* Get timestamp of pos update */
+	getnstimeofday(&alsa_stream->pos_timestamp);
+	diffCallback = (alsa_stream->pos_timestamp.tv_sec - previousPosTimestamp.tv_sec) * 1000000000 + alsa_stream->pos_timestamp.tv_nsec - previousPosTimestamp.tv_nsec;
 
 
 	audio_info("alsa_stream=%p substream=%p\n", alsa_stream,
@@ -71,6 +79,8 @@ void bcm2835_playback_fifo(struct bcm2835_alsa_stream *alsa_stream)
 
 	if (alsa_stream->open)
 		consumed = bcm2835_audio_retrieve_buffers(alsa_stream);
+	
+	diffConsumed = (consumed & 0xFFFF) / 4 * 20833 - diffCallback;
 
 	/* We get called only if playback was triggered, So, the number of buffers we retrieve in
 	 * each iteration are the buffers that have been played out already
@@ -88,16 +98,21 @@ void bcm2835_playback_fifo(struct bcm2835_alsa_stream *alsa_stream)
 		(int) (alsa_stream->period_size * alsa_stream->substream->runtime->periods),
 		frames_to_bytes(alsa_stream->substream->runtime, alsa_stream->substream->runtime->status->hw_ptr),
 		new_period);
+			  
+	old_hw_ptr = alsa_stream->substream->runtime->status->hw_ptr;
 	if (alsa_stream->buffer_size) {
 		alsa_stream->pos += consumed & ~(1 << 30);
 		alsa_stream->pos %= alsa_stream->buffer_size;
 	}
 
 	if (alsa_stream->substream) {
-		if (new_period)
+		//if (new_period)
 			snd_pcm_period_elapsed(alsa_stream->substream);
 	} else {
 		audio_warning(" unexpected NULL substream\n");
+	}
+	{
+		//trace_printk("%d end, %d consumed, %d pending, timediff: %lldns, consumeddiff: %lldns\n", consumed >> 16, consumed & 0xFFFF, alsa_stream->pcm_indirect.hw_ready, diffCallback, diffConsumed);
 	}
 }
 
@@ -337,12 +352,16 @@ static void snd_bcm2835_pcm_transfer(struct snd_pcm_substream *substream,
 {
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	struct bcm2835_alsa_stream *alsa_stream = runtime->private_data;
-	void *src = (void *) (substream->runtime->dma_area + rec->sw_data);
+	char *src = (void *) (substream->runtime->dma_area + rec->sw_data);
 	int err;
-
+	int i;
+	
+	//trace_printk("%d pending, add %zd\n", alsa_stream->pcm_indirect.hw_ready, alsa_stream->audio_size);
 	err = bcm2835_audio_write(alsa_stream, bytes, src);
 	if (err)
 		audio_error(" Failed to transfer to alsa device (%d)\n", err);
+	else
+		alsa_stream->audio_size = 0;
 
 }
 
@@ -351,6 +370,10 @@ static int snd_bcm2835_pcm_ack(struct snd_pcm_substream *substream)
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	struct bcm2835_alsa_stream *alsa_stream = runtime->private_data;
 	struct snd_pcm_indirect *pcm_indirect = &alsa_stream->pcm_indirect;
+	
+	//if(runtime->control->appl_ptr > pcm_indirect->appl_ptr)
+		//trace_printk("%d pending, add %ld\n", pcm_indirect->hw_ready, (runtime->control->appl_ptr - pcm_indirect->appl_ptr) * 4);
+	//WARN_ON((1));
 
 	pcm_indirect->hw_queue_size = runtime->hw.buffer_bytes_max;
 	return snd_pcm_indirect_playback_transfer(substream, pcm_indirect,
@@ -435,6 +458,25 @@ static int snd_bcm2835_pcm_lib_ioctl(struct snd_pcm_substream *substream,
 	audio_info(" .. substream=%p, cmd=%d, arg=%p (%x) ret=%d\n", substream,
 		cmd, arg, arg ? *(unsigned *) arg : 0, ret);
 	return ret;
+}
+
+static int snd_bcm2835_pcm_get_time_info(struct snd_pcm_substream *substream,
+			struct timespec *system_ts, struct timespec *audio_ts,
+			struct snd_pcm_audio_tstamp_config *audio_tstamp_config,
+			struct snd_pcm_audio_tstamp_report *audio_tstamp_report)
+{
+	struct snd_pcm_runtime *runtime = substream->runtime;
+	bcm2835_alsa_stream_t *alsa_stream = runtime->private_data;
+	
+	snd_pcm_gettime(runtime, system_ts);
+
+	*audio_ts = alsa_stream->pos_timestamp;
+
+	audio_tstamp_report->actual_type = SNDRV_PCM_AUDIO_TSTAMP_TYPE_LINK_ESTIMATED;
+	audio_tstamp_report->accuracy_report = 1; /* rest of structure is valid */
+	audio_tstamp_report->accuracy = 80000; /* 80us estimated with vchiq_test -p */
+
+	return 0;
 }
 
 /* operators */
