@@ -148,6 +148,7 @@ static int configure_dma(struct bcm2835_pwm_aud_t* chip) {
 	generate_sinus(chip, chip->dma_virt_src, dma_buffer_size);
 	*/
 	initialize_dma_buffer(chip->dma_virt_src, chip->dma_buffer_sample_count);
+	chip->pos = 0;
 
 	memset(&config, 0, sizeof(config));
 	config.direction = DMA_MEM_TO_DEV;
@@ -323,7 +324,7 @@ int bcm2835_pwm_aud_configure(struct bcm2835_pwm_aud_t* chip,
 {
 	int ret = 0;
 	
-	const int flags = PWM_CTRL_USE_FIFO;
+	const int flags = PWM_CTRL_USE_FIFO/* | PWM_CTRL_REPEAT*/;
 	const int control = PWM_CTRL_FLAGS(0, flags) |
 						PWM_CTRL_FLAGS(1, flags);
 
@@ -365,6 +366,11 @@ int bcm2835_pwm_aud_unconfigure(struct bcm2835_pwm_aud_t* chip)
 		return 0;
 	
 	if(chip->tx) {
+			//dev_dbg(&chip->pdev->dev, "control = %x\n", pwm_reg_read(chip, PWM_REG_CONTROL));
+			//dev_dbg(&chip->pdev->dev, "dmac = %x\n", pwm_reg_read(chip, PWM_REG_DMAC));
+			bcm2835_pwm_aud_pause(chip, false);
+			//dev_dbg(&chip->pdev->dev, "control = %x\n", pwm_reg_read(chip, PWM_REG_CONTROL));
+			//dev_dbg(&chip->pdev->dev, "dmac = %x\n", pwm_reg_read(chip, PWM_REG_DMAC));
 			dev_dbg(&chip->pdev->dev, "terminating dma\n");
 			dmaengine_pause(chip->dma_channel);
 			ret = dmaengine_terminate_sync(chip->dma_channel);
@@ -390,18 +396,38 @@ int bcm2835_pwm_aud_unconfigure(struct bcm2835_pwm_aud_t* chip)
 
 int bcm2835_pwm_aud_enable(struct bcm2835_pwm_aud_t* chip, int enable) {
 	const int control = pwm_reg_read(chip, PWM_REG_CONTROL);
-	const int dmac = pwm_reg_read(chip, PWM_REG_DMAC);
 	
 	if(enable) {
 		pwm_reg_write(chip, control | PWM_CTRL_CLEAR_FIFO, PWM_REG_CONTROL);
-		pwm_reg_write(chip, dmac | PWM_DMAC_ENABLE, PWM_REG_DMAC);
 		pwm_reg_write(chip, control | PWM_CTRL_FLAGS(0, PWM_CTRL_ENABLE) | PWM_CTRL_FLAGS(1, PWM_CTRL_ENABLE), PWM_REG_CONTROL);
 	} else {
+		bcm2835_pwm_aud_pause(chip, true);
 		pwm_reg_write(chip, control & (~(PWM_CTRL_FLAGS(0, PWM_CTRL_ENABLE) | PWM_CTRL_FLAGS(1, PWM_CTRL_ENABLE))), PWM_REG_CONTROL);
-		pwm_reg_write(chip, dmac & (~PWM_DMAC_ENABLE), PWM_REG_DMAC);
 	}
 	
 	return 0;
+}
+
+int bcm2835_pwm_aud_pause(struct bcm2835_pwm_aud_t* chip, int pause) {
+	const int dmac = pwm_reg_read(chip, PWM_REG_DMAC);
+	const int control = pwm_reg_read(chip, PWM_REG_CONTROL);
+	const int repeat_flags = PWM_CTRL_FLAGS(0, PWM_CTRL_REPEAT) | PWM_CTRL_FLAGS(1, PWM_CTRL_REPEAT);
+	
+	/* Enable repeat to avoid a big pop when output goes to DC 0V. */
+	
+	if(pause) {
+		pwm_reg_write(chip, control | repeat_flags, PWM_REG_CONTROL);
+		pwm_reg_write(chip, dmac & (~PWM_DMAC_ENABLE), PWM_REG_DMAC);
+	} else {
+		pwm_reg_write(chip, dmac | PWM_DMAC_ENABLE, PWM_REG_DMAC);
+		pwm_reg_write(chip, (control & (~repeat_flags)), PWM_REG_CONTROL);
+	}
+	
+	return 0;
+}
+
+void bcm2835_pwm_aud_reset_pos(struct bcm2835_pwm_aud_t* chip) {
+	chip->pos = bcm2835_pwm_aud_pointer_internal(chip);
 }
 
 int bcm2835_pwm_aud_write(struct bcm2835_pwm_aud_t* chip, void* data, int size_sample) {
@@ -411,7 +437,7 @@ int bcm2835_pwm_aud_write(struct bcm2835_pwm_aud_t* chip, void* data, int size_s
 	int i, j;
 	int dma_pos, dma_pos_start;
 	
-	dma_pos_start = dma_pos = (bcm2835_pwm_aud_pointer_internal(chip) / chip->dma_period_sample_count + 2) * chip->dma_period_sample_count;
+	dma_pos_start = dma_pos = chip->pos; //(bcm2835_pwm_aud_pointer_internal(chip) / chip->dma_period_sample_count + 2) * chip->dma_period_sample_count;
 	/*
 	if(offset_sample + size_sample > chip->dma_buffer_sample_count) {
 		dev_err(&chip->pdev->dev, "bad write offset %d or size %d, above buffer size %d\n", offset_sample, size_sample, chip->dma_buffer_sample_count);
@@ -433,8 +459,8 @@ int bcm2835_pwm_aud_write(struct bcm2835_pwm_aud_t* chip, void* data, int size_s
 				dma_pos -= chip->dma_buffer_sample_count;
 		}
 	}
-	//chip->pos = dma_pos;
-	//printk("write at [%d %d], [%d %d], max %d\n", offset_sample, offset_sample + size_sample, dma_pos_start, dma_pos, chip->dma_buffer_sample_count);
+	chip->pos = dma_pos;
+	//printk("write [0 %d], [%d %d], max %d\n", size_sample, dma_pos_start, dma_pos, chip->dma_buffer_sample_count);
 	/*
 	for(i = 0; i < size_sample; i++) {
 		output[i].left = ((input[i].left * volume) / 65536) + PWM_RANGE / 2;
@@ -479,5 +505,7 @@ static int bcm2835_pwm_aud_pointer_internal(struct bcm2835_pwm_aud_t* chip) {
 }
 
 int bcm2835_pwm_aud_pointer(struct bcm2835_pwm_aud_t* chip) {
-	return bcm2835_pwm_aud_pointer_internal(chip) * 3 / 25;
+	int pos = bcm2835_pwm_aud_pointer_internal(chip);
+
+	return pos >= 0 ? pos * 3 / 25 : pos;
 }

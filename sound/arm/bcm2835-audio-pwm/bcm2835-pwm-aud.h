@@ -28,6 +28,7 @@ struct bcm2835_pwm_aud_t {
 	
 	atomic_t running; // concurrent
 	atomic_t volume; // concurrent
+	int paused;
 	
 	dma_addr_t pwm_bus_base;
 	dma_addr_t dma_bus_src;
@@ -40,6 +41,8 @@ struct bcm2835_pwm_aud_t {
 	// resampling 48khz to 400khz
 	struct filter_fir_t filter;
 	int pos;
+	int pos_offset;
+	int paused_pos;
 };
 
 int bcm2835_pwm_aud_init(struct bcm2835_pwm_aud_t* chip, struct platform_device* pdev);
@@ -47,6 +50,8 @@ void bcm2835_pwm_aud_free(struct bcm2835_pwm_aud_t* chip);
 int bcm2835_pwm_aud_configure(struct bcm2835_pwm_aud_t* chip, int dma_period_sample_count, int dma_period_count, period_callback_t callback, void* callback_arg);
 int bcm2835_pwm_aud_unconfigure(struct bcm2835_pwm_aud_t* chip);
 int bcm2835_pwm_aud_enable(struct bcm2835_pwm_aud_t* chip, int enable);
+int bcm2835_pwm_aud_pause(struct bcm2835_pwm_aud_t* chip, int pause);
+void bcm2835_pwm_aud_reset_pos(struct bcm2835_pwm_aud_t* chip);
 int bcm2835_pwm_aud_write(struct bcm2835_pwm_aud_t* chip, void* data, int size_sample);
 int bcm2835_pwm_aud_pointer(struct bcm2835_pwm_aud_t* chip);
 
